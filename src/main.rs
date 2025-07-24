@@ -1,5 +1,6 @@
 use std::io::{prelude::*, BufReader, BufWriter};
 use std::net::{TcpListener, TcpStream};
+use std::thread;
 
 const PONG: &[u8] = b"+PONG\r\n";
 
@@ -33,7 +34,9 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(mut _stream) => {
-                handle_connection(_stream);
+                thread::spawn(|| {
+                    handle_connection(_stream);
+                });
             }
             Err(e) => {
                 println!("error: {}", e);
