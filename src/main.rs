@@ -279,6 +279,10 @@ impl<'a> Request<'a> {
             "MULTI" => {
                 self.resp_writer.write_simple_string("OK");
             }
+            "EXEC" => {
+                self.resp_writer
+                    .write_simple_error("ERR EXEC without MULTI");
+            }
             _ => {
                 panic!("read unknown command: {}", &self.buf);
             }
