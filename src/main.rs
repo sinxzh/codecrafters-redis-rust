@@ -40,23 +40,23 @@ impl KV {
 
     fn get_del<F>(&self, key: &str, cb: F)
     where
-        F: FnOnce(Option<&str>),
+        F: FnOnce(Option<&mut Value>),
     {
         let mut kvs_guard = self.kvs.lock().unwrap();
 
-        let mut cb_arg: Option<&str> = None;
+        let mut cb_arg: Option<&mut Value> = None;
         let mut del = false;
 
-        if let Some(val) = kvs_guard.get(key) {
+        if let Some(val) = kvs_guard.get_mut(key) {
             match val.expire_at {
                 Some(exp) => {
                     if exp > Instant::now() {
-                        cb_arg = Some(&val.val);
+                        cb_arg = Some(val);
                     } else {
                         del = true;
                     }
                 }
-                None => cb_arg = Some(&val.val),
+                None => cb_arg = Some(val),
             }
         }
         cb(cb_arg);
@@ -64,7 +64,6 @@ impl KV {
         if del {
             kvs_guard.remove(key);
         }
-
     }
 }
 
@@ -97,6 +96,12 @@ impl<'a> ResponseWriter<'a> {
 
     fn write_null_bulk_string(&mut self) {
         self.writer.write_all(b"$-1\r\n").unwrap();
+        self.writer.flush().unwrap();
+    }
+
+    fn write_integer(&mut self, num: i64) {
+        let num_str = format!(":{}\r\n", num);
+        self.writer.write_all(num_str.as_bytes()).unwrap();
         self.writer.flush().unwrap();
     }
 }
@@ -221,15 +226,33 @@ impl<'a> Request<'a> {
 
                 let resp_writer = &mut self.resp_writer;
 
-                let get_cb = move |val: Option<&str>| {
+                let get_cb = move |val: Option<&mut Value>| {
                     if let Some(_val) = val {
-                        resp_writer.write_bulk_string(_val);
+                        resp_writer.write_bulk_string(_val.val.as_str());
                     } else {
                         resp_writer.write_null_bulk_string();
                     }
                 };
 
                 self.kvs.get_del(key, get_cb);
+            }
+            "INCR" => {
+                self.read_bulk_string();
+                self.arg_cnt -= 1;
+                let key = self.buf.trim();
+
+                let resp_writer = &mut self.resp_writer;
+
+                let incr_cb = move |val: Option<&mut Value>| {
+                    if let Some(_val) = val {
+                        let mut num: i64 = _val.val.parse().unwrap();
+                        num += 1;
+                        _val.val = format!("{}", num);
+                        resp_writer.write_integer(num);
+                    }
+                };
+
+                self.kvs.get_del(key, incr_cb);
             }
             _ => {
                 panic!("read unknown command: {}", &self.buf);
