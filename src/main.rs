@@ -1,15 +1,79 @@
 use std::collections::HashMap;
-use std::io::{prelude::*, BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, prelude::*};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
+
+struct Value {
+    val: String,
+    expire_at: Option<Instant>,
+}
+
+impl Value {
+    fn new(val: String, expire_mills: Option<u64>) -> Value {
+        let expire_at = expire_mills.map(|mills| Instant::now() + Duration::from_millis(mills));
+        Value { val, expire_at }
+    }
+}
+
+struct KV {
+    kvs: Arc<Mutex<HashMap<String, Value>>>,
+}
+
+impl KV {
+    fn new() -> KV {
+        KV {
+            kvs: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn clone(&self) -> KV {
+        KV {
+            kvs: Arc::clone(&self.kvs),
+        }
+    }
+
+    fn set(&mut self, key: String, val: Value) {
+        self.kvs.lock().unwrap().insert(key, val);
+    }
+
+    fn get_del<F>(&self, key: &str, cb: F)
+    where
+        F: FnOnce(Option<&str>),
+    {
+        let mut kvs_guard = self.kvs.lock().unwrap();
+
+        let mut cb_arg: Option<&str> = None;
+        let mut del = false;
+
+        if let Some(val) = kvs_guard.get(key) {
+            match val.expire_at {
+                Some(exp) => {
+                    if exp > Instant::now() {
+                        cb_arg = Some(&val.val);
+                    } else {
+                        del = true;
+                    }
+                }
+                None => cb_arg = Some(&val.val),
+            }
+        }
+        cb(cb_arg);
+
+        if del {
+            kvs_guard.remove(key);
+        }
+
+    }
+}
 
 struct ResponseWriter<'a> {
     writer: BufWriter<&'a TcpStream>,
 }
 
 impl<'a> ResponseWriter<'a> {
-    fn new(stream: &'a TcpStream) -> ResponseWriter {
+    fn new(stream: &'a TcpStream) -> ResponseWriter<'a> {
         ResponseWriter {
             writer: BufWriter::new(&stream),
         }
@@ -38,22 +102,21 @@ impl<'a> ResponseWriter<'a> {
 }
 
 struct Request<'a> {
-    cnt: usize,
-
     buf_reader: BufReader<&'a TcpStream>,
     buf: String,
+    arg_cnt: usize,
 
     resp_writer: ResponseWriter<'a>,
 
-    kvs: Arc<Mutex<HashMap<String, String>>>,
+    kvs: KV,
 }
 
 impl<'a> Request<'a> {
-    fn new(stream: &'a TcpStream, kvs: Arc<Mutex<HashMap<String, String>>>) -> Request<'a> {
+    fn new(stream: &'a TcpStream, kvs: KV) -> Request<'a> {
         Request {
-            cnt: 0,
             buf_reader: BufReader::new(&stream),
             buf: String::new(),
+            arg_cnt: 0,
             resp_writer: ResponseWriter::new(&stream),
             kvs,
         }
@@ -74,8 +137,6 @@ impl<'a> Request<'a> {
 
         assert!(self.read_line() > 0);
         assert!(str_len == self.buf.trim().len());
-
-        self.cnt -= 1;
     }
 
     fn parse(&mut self) {
@@ -87,10 +148,33 @@ impl<'a> Request<'a> {
             }
 
             assert!(self.buf.starts_with('*'));
-            self.cnt = self.buf[1..].trim().parse().unwrap();
+            self.arg_cnt = self.buf[1..].trim().parse().unwrap();
+            self.arg_cnt -= 1;
 
-            while self.cnt > 0 {
-                self.parse_command();
+            self.parse_command();
+        }
+    }
+
+    fn parse_set_arg(&mut self, val: &mut Value) {
+        let mut i = 0;
+        println!("arg cnt: {}", self.arg_cnt);
+        while i < self.arg_cnt {
+            println!("{} arg", i);
+            self.read_bulk_string();
+            i += 1;
+            let arg = self.buf.trim().to_uppercase();
+            println!("parse set arg: {}", arg);
+
+            match arg.as_str() {
+                "PX" => {
+                    self.read_bulk_string();
+                    i += 1;
+                    let mills: u64 = self.buf.trim().parse().unwrap();
+                    val.expire_at = Some(Instant::now() + Duration::from_millis(mills));
+                }
+                _ => {
+                    panic!("unknown set arg: {}", arg);
+                }
             }
         }
     }
@@ -109,43 +193,55 @@ impl<'a> Request<'a> {
             }
             "ECHO" => {
                 self.read_bulk_string();
+                self.arg_cnt -= 1;
                 let val = &self.buf.trim().to_string();
                 self.resp_writer.write_bulk_string(val.as_str());
             }
             "SET" => {
                 self.read_bulk_string();
+                self.arg_cnt -= 1;
                 let key = self.buf.trim().to_string();
 
                 self.read_bulk_string();
-                let val = self.buf.trim().to_string();
+                self.arg_cnt -= 1;
+                let mut val = Value::new(self.buf.trim().to_string(), None);
 
-                self.kvs.lock().unwrap().insert(key, val);
+                if self.arg_cnt > 0 {
+                    self.parse_set_arg(&mut val);
+                }
+
+                self.kvs.set(key, val);
 
                 self.resp_writer.write_simple_string("OK");
             }
             "GET" => {
                 self.read_bulk_string();
+                self.arg_cnt -= 1;
                 let key = self.buf.trim();
 
-                if let Some(val) = self.kvs.lock().unwrap().get(key) {
-                    self.resp_writer.write_bulk_string(val);
-                } else {
-                    self.resp_writer.write_null_bulk_string();
-                }
+                let resp_writer = &mut self.resp_writer;
+
+                let get_cb = move |val: Option<&str>| {
+                    if let Some(_val) = val {
+                        resp_writer.write_bulk_string(_val);
+                    } else {
+                        resp_writer.write_null_bulk_string();
+                    }
+                };
+
+                self.kvs.get_del(key, get_cb);
             }
             _ => {
                 panic!("read unknown command: {}", &self.buf);
             }
         }
-
-        self.cnt -= 1;
     }
 }
 
-fn handle_connection(stream: TcpStream, kvs: Arc<Mutex<HashMap<String, String>>>) {
+fn handle_connection(stream: TcpStream, kv: KV) {
     println!("accepted new connection");
 
-    let mut req = Request::new(&stream, kvs);
+    let mut req = Request::new(&stream, kv);
     req.parse();
 }
 
@@ -153,15 +249,15 @@ fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
 
     let mut handles = vec![];
-    let kvs: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let kv = KV::new();
 
     for stream in listener.incoming() {
-        let kvs = Arc::clone(&kvs);
+        let kv = kv.clone();
 
         match stream {
             Ok(_stream) => {
                 handles.push(thread::spawn(move || {
-                    handle_connection(_stream, kvs);
+                    handle_connection(_stream, kv);
                 }));
             }
             Err(e) => {
