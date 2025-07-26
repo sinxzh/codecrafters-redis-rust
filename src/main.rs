@@ -110,6 +110,13 @@ impl<'a> ResponseWriter<'a> {
         self.writer.write_all(num_str.as_bytes()).unwrap();
         self.writer.flush().unwrap();
     }
+
+    fn write_simple_error(&mut self, content: &str) {
+        self.writer.write_all(b"-").unwrap();
+        self.writer.write_all(content.as_bytes()).unwrap();
+        self.writer.write_all(b"\r\n").unwrap();
+        self.writer.flush().unwrap();
+    }
 }
 
 struct Request<'a> {
@@ -251,10 +258,14 @@ impl<'a> Request<'a> {
 
                 let incr_cb = move |val: Option<&mut Value>| {
                     if let Some(_val) = val {
-                        let mut num: i64 = _val.val.parse().unwrap();
-                        num += 1;
-                        _val.val = format!("{}", num);
-                        resp_writer.write_integer(num);
+                        if let Ok(mut num) = _val.val.parse() {
+                            num += 1;
+                            _val.val = format!("{}", num);
+                            resp_writer.write_integer(num);
+                        } else {
+                            resp_writer
+                                .write_simple_error("ERR value is not an integer or out of range");
+                        }
                     }
                 };
 
