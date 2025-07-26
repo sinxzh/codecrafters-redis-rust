@@ -38,7 +38,7 @@ impl KV {
         self.kvs.lock().unwrap().insert(key, val);
     }
 
-    fn get_del<F>(&self, key: &str, cb: F)
+    fn get_del<F>(&self, key: &str, cb: F) -> bool
     where
         F: FnOnce(Option<&mut Value>),
     {
@@ -46,6 +46,7 @@ impl KV {
 
         let mut cb_arg: Option<&mut Value> = None;
         let mut del = false;
+        let mut not_exist = false;
 
         if let Some(val) = kvs_guard.get_mut(key) {
             match val.expire_at {
@@ -56,7 +57,10 @@ impl KV {
                         del = true;
                     }
                 }
-                None => cb_arg = Some(val),
+                None => {
+                    cb_arg = Some(val);
+                    not_exist = true;
+                }
             }
         }
         cb(cb_arg);
@@ -64,6 +68,8 @@ impl KV {
         if del {
             kvs_guard.remove(key);
         }
+
+        return if del || not_exist { true } else { false };
     }
 }
 
@@ -252,7 +258,12 @@ impl<'a> Request<'a> {
                     }
                 };
 
-                self.kvs.get_del(key, incr_cb);
+                if !self.kvs.get_del(key, incr_cb) {
+                    self.kvs
+                        .set(key.to_string(), Value::new("1".to_string(), None));
+
+                    self.resp_writer.write_integer(1);
+                }
             }
             _ => {
                 panic!("read unknown command: {}", &self.buf);
