@@ -276,6 +276,9 @@ impl<'a> Request<'a> {
                     self.resp_writer.write_integer(1);
                 }
             }
+            "MULTI" => {
+                self.resp_writer.write_simple_string("OK");
+            }
             _ => {
                 panic!("read unknown command: {}", &self.buf);
             }
