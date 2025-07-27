@@ -1,9 +1,37 @@
+use std::fmt;
 use std::io::{BufReader, BufWriter, prelude::*};
 use std::net::TcpStream;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Error;
 
 use crate::kv_store::{KvItem, KvStore};
+
+#[derive(Copy, Clone)]
+pub enum ServerRole {
+    Master(&'static str),
+    Slave(&'static str),
+}
+
+impl fmt::Display for ServerRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ServerRole::Master(name) => write!(f, "{}", name),
+            ServerRole::Slave(name) => write!(f, "{}", name),
+        }
+    }
+}
+
+pub struct ServerInfo {
+    pub port: u16,
+    pub role: ServerRole,
+}
+
+impl ServerInfo {
+    pub fn new(port: u16, role: ServerRole) -> ServerInfo {
+        ServerInfo { port, role }
+    }
+}
 
 pub struct Request<'a> {
     reader: BufReader<&'a TcpStream>,
@@ -124,7 +152,8 @@ impl<'a> Response<'a> {
     pub fn process_command(
         &mut self,
         command: &Command,
-        kv_store: &mut KvStore,
+        kv_store: &Arc<RwLock<KvStore>>,
+        server_info: &Arc<RwLock<ServerInfo>>,
     ) -> Result<(), Error> {
         println!("State: {:?} | process: {:?}", self.state, command);
 
@@ -133,11 +162,11 @@ impl<'a> Response<'a> {
                 "MULTI" => {
                     self.commands = Some(Vec::new());
 
-                    self.exec_command(command, kv_store)?;
+                    self.exec_command(command, kv_store, server_info)?;
                     self.state = ResponseState::Queue;
                 }
                 _ => {
-                    self.exec_command(command, kv_store)?;
+                    self.exec_command(command, kv_store, server_info)?;
                 }
             },
             ResponseState::Queue => match command.name.as_str() {
@@ -147,7 +176,7 @@ impl<'a> Response<'a> {
 
                     if let Some(commands) = &self.commands.take() {
                         for command in commands {
-                            self.exec_command(command, kv_store)?;
+                            self.exec_command(command, kv_store, server_info)?;
                         }
                     }
 
@@ -199,7 +228,12 @@ impl<'a> Response<'a> {
         Ok(())
     }
 
-    fn exec_command(&mut self, command: &Command, kv_store: &mut KvStore) -> Result<(), Error> {
+    fn exec_command(
+        &mut self,
+        command: &Command,
+        kv_store: &Arc<RwLock<KvStore>>,
+        server_info: &Arc<RwLock<ServerInfo>>,
+    ) -> Result<(), Error> {
         println!("State: {:?} | exec: {:?}", self.state, command);
 
         if self.state != ResponseState::Exec {
@@ -237,6 +271,7 @@ impl<'a> Response<'a> {
                                 if let Some(expire_mills) =
                                     command.args.get(3).and_then(|s| s.parse::<u64>().ok())
                                 {
+                                    let mut kv_store = kv_store.write().unwrap();
                                     kv_store.insert(
                                         key.clone(),
                                         KvItem::new(val.clone(), Some(expire_mills)),
@@ -252,6 +287,7 @@ impl<'a> Response<'a> {
                             }
                         }
                     } else {
+                        let mut kv_store = kv_store.write().unwrap();
                         kv_store.insert(key.clone(), KvItem::new(val.clone(), None));
                     }
                     self.write(resp);
@@ -273,6 +309,7 @@ impl<'a> Response<'a> {
                         }
                     };
 
+                    let mut kv_store = kv_store.write().unwrap();
                     kv_store.do_action(key, get_action);
                 }
             }
@@ -300,11 +337,14 @@ impl<'a> Response<'a> {
                                 incr_result = Ok(1);
                             }
                         };
+
+                        let mut kv_store = kv_store.write().unwrap();
                         kv_store.do_action(key, incr_action);
                     }
 
                     match incr_result {
                         Ok(num) => {
+                            let mut kv_store = kv_store.write().unwrap();
                             kv_store.insert(key.clone(), KvItem::new(num.to_string(), None));
                             self.write(ResponseType::Integer(num));
                         }
@@ -331,7 +371,10 @@ impl<'a> Response<'a> {
                 let section = command.args[0].to_lowercase();
                 match section.as_str() {
                     "replication" => {
-                        self.write(ResponseType::BulkString("# Replication\r\nrole:master"));
+                        let server_info = server_info.read().unwrap();
+                        self.write(ResponseType::BulkString(
+                            format!("# Replication\r\nrole:{}", server_info.role).as_str(),
+                        ));
                     }
                     _ => {
                         todo!("other section for INFO command: {}", section);

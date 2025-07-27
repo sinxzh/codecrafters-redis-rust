@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
@@ -20,30 +19,23 @@ impl KvItem {
 }
 
 pub struct KvStore {
-    items: Arc<RwLock<HashMap<String, KvItem>>>,
+    items: HashMap<String, KvItem>,
 }
 
 impl KvStore {
     pub fn new() -> KvStore {
         KvStore {
-            items: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    pub fn clone(kv_store: &KvStore) -> KvStore {
-        KvStore {
-            items: Arc::clone(&kv_store.items),
+            items: HashMap::new(),
         }
     }
 
     pub fn insert(&mut self, key: String, val: KvItem) {
         println!("set key: {}, val: {:?}", key, val);
-        self.items.write().unwrap().insert(key, val);
+        self.items.insert(key, val);
     }
 
     pub fn get_clone(&self, key: &str) -> Option<KvItem> {
-        let items_guard = self.items.read().unwrap();
-        if let Some(val) = items_guard.get(key) {
+        if let Some(val) = self.items.get(key) {
             println!("get key: {}, val: {:?}", key, val);
             if let Some(exp) = val.expire_at {
                 if exp > Instant::now() {
@@ -60,8 +52,7 @@ impl KvStore {
     where
         F: FnOnce(&str, Option<&mut KvItem>),
     {
-        let mut items_guard = self.items.write().unwrap();
-        if let Some(val) = items_guard.get_mut(key) {
+        if let Some(val) = self.items.get_mut(key) {
             if let Some(exp) = val.expire_at {
                 if exp > Instant::now() {
                     action_cb(key, Some(val));
