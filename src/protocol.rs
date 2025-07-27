@@ -23,13 +23,27 @@ impl fmt::Display for ServerRole {
 }
 
 pub struct ServerInfo {
+    id: String,
     pub port: u16,
-    pub role: ServerRole,
+    role: ServerRole,
+    replication_offset: usize,
 }
 
 impl ServerInfo {
-    pub fn new(port: u16, role: ServerRole) -> ServerInfo {
-        ServerInfo { port, role }
+    pub fn new(id: String, port: u16, role: ServerRole) -> ServerInfo {
+        ServerInfo {
+            id,
+            port,
+            role,
+            replication_offset: 0,
+        }
+    }
+
+    fn to_string(&self) -> String {
+        format!(
+            "# Replication\r\nrole:{}\r\nmaster_repl_offset:{}\r\nmaster_replid:{}",
+            self.role, self.replication_offset, self.id
+        )
     }
 }
 
@@ -372,9 +386,7 @@ impl<'a> Response<'a> {
                 match section.as_str() {
                     "replication" => {
                         let server_info = server_info.read().unwrap();
-                        self.write(ResponseType::BulkString(
-                            format!("# Replication\r\nrole:{}", server_info.role).as_str(),
-                        ));
+                        self.write(ResponseType::BulkString(server_info.to_string().as_str()));
                     }
                     _ => {
                         todo!("other section for INFO command: {}", section);

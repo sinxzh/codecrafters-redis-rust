@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 
 use clap::Parser;
+use rand::seq::IndexedRandom;
 
 use crate::kv_store::KvStore;
 use crate::protocol::{Request, Response, ServerInfo, ServerRole};
@@ -82,6 +83,21 @@ impl Server {
     }
 }
 
+fn generate_random_alphanumeric(count: usize) -> String {
+    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+
+    let mut rng = rand::rng();
+
+    let random_string: String = (0..count)
+        .map(|_| {
+            let random_char = CHARSET.choose(&mut rng).unwrap();
+            *random_char as char
+        })
+        .collect();
+
+    random_string
+}
+
 fn main() {
     let args = Args::parse();
     let port = args.port;
@@ -91,7 +107,7 @@ fn main() {
         ServerRole::Slave("slave")
     };
 
-    let server_info = ServerInfo::new(port, role);
+    let server_info = ServerInfo::new(generate_random_alphanumeric(40), port, role);
 
     if let Ok(server) = Server::new(server_info) {
         println!("Starting server on port {}, role: {}", port, role);
