@@ -1,6 +1,8 @@
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
+use clap::Parser;
+
 use crate::kv_store::KvStore;
 use crate::protocol::{Request, Response};
 
@@ -29,8 +31,17 @@ fn handle_connection(stream: TcpStream, mut kv: KvStore) {
     }
 }
 
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(long, default_value = "6379")]
+    port: u16,
+}
+
 fn main() {
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
+    let args = Args::parse();
+    println!("Starting server on port {}", args.port);
+
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", args.port)).unwrap();
 
     let mut handles = vec![];
     let kv = KvStore::new();
