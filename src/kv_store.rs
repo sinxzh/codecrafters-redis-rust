@@ -56,7 +56,7 @@ impl KvStore {
         None
     }
 
-    pub fn do_action<F>(&mut self, key: &str, action_cb: F) -> bool
+    pub fn do_action<F>(&mut self, key: &str, action_cb: F)
     where
         F: FnOnce(&str, Option<&mut KvItem>),
     {
@@ -65,14 +65,14 @@ impl KvStore {
             if let Some(exp) = val.expire_at {
                 if exp > Instant::now() {
                     action_cb(key, Some(val));
-                    return true;
+                } else {
+                    action_cb(key, None);
                 }
+            } else {
+                action_cb(key, Some(val));
             }
         } else {
             action_cb(key, None);
-            return true;
         }
-
-        return false;
     }
 }

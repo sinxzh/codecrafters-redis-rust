@@ -71,7 +71,7 @@ enum ResponseType<'a> {
     NullBulkString,
     Integer(i64),
     SimpleError(&'a str),
-    EmptyArray,
+    ArrayHeader(usize),
 }
 
 #[derive(Debug, PartialEq)]
@@ -90,38 +90,28 @@ impl<'a> Response<'a> {
         }
     }
 
-    fn push_simple_string(&mut self, content: &str) {
-        self.buffer.push('+');
-        self.buffer.push_str(content);
-        self.buffer.push_str("\r\n");
-    }
-
-    fn push_bulk_string(&mut self, content: &str) {
-        self.buffer.push('$');
-        self.buffer.push_str(&content.len().to_string());
-        self.buffer.push_str("\r\n");
-        self.buffer.push_str(content);
-        self.buffer.push_str("\r\n");
-    }
-
-    fn push_null_bulk_string(&mut self) {
-        self.buffer.push_str("$-1\r\n");
-    }
-
-    fn push_integer(&mut self, num: i64) {
-        self.buffer.push(':');
-        self.buffer.push_str(&num.to_string());
-        self.buffer.push_str("\r\n");
-    }
-
-    fn push_simple_error(&mut self, content: &str) {
-        self.buffer.push('-');
-        self.buffer.push_str(content);
-        self.buffer.push_str("\r\n");
-    }
-
-    fn push_empty_array(&mut self) {
-        self.buffer.push_str("*0\r\n");
+    fn write(&mut self, resp_type: ResponseType) {
+        let buffer = &mut self.buffer;
+        match resp_type {
+            ResponseType::SimpleString(content) => {
+                buffer.push_str(format!("+{}\r\n", content).as_str());
+            }
+            ResponseType::BulkString(content) => {
+                buffer.push_str(format!("${}\r\n{}\r\n", content.len(), content).as_str());
+            }
+            ResponseType::NullBulkString => {
+                buffer.push_str("$-1\r\n");
+            }
+            ResponseType::Integer(num) => {
+                buffer.push_str(format!(":{}\r\n", num).as_str());
+            }
+            ResponseType::SimpleError(content) => {
+                buffer.push_str(format!("-{}\r\n", content).as_str());
+            }
+            ResponseType::ArrayHeader(cnt) => {
+                buffer.push_str(format!("*{}\r\n", cnt).as_str());
+            }
+        }
     }
 
     fn send(&mut self) -> Result<(), Error> {
@@ -141,11 +131,13 @@ impl<'a> Response<'a> {
         match self.state {
             ResponseState::Exec => match command.name.as_str() {
                 "COMMAND" | "PING" | "ECHO" | "SET" | "GET" | "INCR" | "EXEC" => {
-                    self.exec_command(command, kv_store)?
+                    self.exec_command(command, kv_store)?;
+                    self.send()?;
                 }
                 "MULTI" => {
                     self.commands = Some(Vec::new());
                     self.exec_command(command, kv_store)?;
+                    self.send()?;
                     self.state = ResponseState::Queue;
                 }
                 _ => {
@@ -154,15 +146,13 @@ impl<'a> Response<'a> {
             },
             ResponseState::Queue => match command.name.as_str() {
                 "EXEC" => {
-                    if let Some(commands) = &self.commands.take()
-                        && !commands.is_empty()
-                    {
+                    self.exec_command(command, kv_store)?; // Write array header
+                    if let Some(commands) = &self.commands.take() {
                         for command in commands {
                             self.exec_command(command, kv_store)?;
                         }
-                    } else {
-                        self.exec_command(command, kv_store)?;
                     }
+                    self.send()?;
                     self.state = ResponseState::Exec;
                 }
                 _ => self.queue_command(command)?,
@@ -181,7 +171,7 @@ impl<'a> Response<'a> {
             return Err(Error::msg("Commands list not initialized"));
         }
 
-        self.push_simple_string("QUEUED");
+        self.write(ResponseType::SimpleString("QUEUED"));
         self.send()?;
         Ok(())
     }
@@ -189,27 +179,25 @@ impl<'a> Response<'a> {
     fn exec_command(&mut self, command: &Command, kv_store: &mut KvStore) -> Result<(), Error> {
         println!("State: {:?} | exec: {:?}", self.state, command);
 
-        let mut resps = Vec::new();
-
         match command.name.as_str() {
             "COMMAND" => {
-                resps.push(ResponseType::EmptyArray);
+                self.write(ResponseType::ArrayHeader(0));
             }
             "PING" => {
-                resps.push(ResponseType::SimpleString("PONG"));
+                self.write(ResponseType::SimpleString("PONG"));
             }
             "ECHO" => {
                 if command.args.is_empty() {
-                    resps.push(ResponseType::SimpleError(
+                    self.write(ResponseType::SimpleError(
                         "ERR wrong number of arguments for 'echo' command",
                     ));
                 } else {
-                    resps.push(ResponseType::BulkString(&command.args[0]));
+                    self.write(ResponseType::BulkString(&command.args[0]));
                 }
             }
             "SET" => {
                 if command.args.len() < 2 {
-                    resps.push(ResponseType::SimpleError(
+                    self.write(ResponseType::SimpleError(
                         "ERR wrong number of arguments for 'set' command",
                     ));
                 } else {
@@ -239,73 +227,85 @@ impl<'a> Response<'a> {
                     } else {
                         kv_store.insert(key.clone(), KvItem::new(val.clone(), None));
                     }
-                    resps.push(resp);
+                    self.write(resp);
                 }
             }
             "GET" => {
                 if command.args.is_empty() {
-                    resps.push(ResponseType::SimpleError(
+                    self.write(ResponseType::SimpleError(
                         "ERR wrong number of arguments for 'get' command",
                     ));
                 } else {
                     let key = &command.args[0];
-                    if let Some(item) = kv_store.get_clone(key) {
-                        // the item is not lived enough, so we need to send it right now
-                        self.push_bulk_string(&item.val);
-                        self.send()?;
-                        return Ok(());
-                    } else {
-                        resps.push(ResponseType::NullBulkString);
-                    }
+
+                    let get_action = |_: &str, item: Option<&mut KvItem>| {
+                        if let Some(item) = item {
+                            self.write(ResponseType::BulkString(&item.val));
+                        } else {
+                            self.write(ResponseType::NullBulkString);
+                        }
+                    };
+
+                    kv_store.do_action(key, get_action);
                 }
             }
             "INCR" => {
                 if command.args.is_empty() {
-                    resps.push(ResponseType::SimpleError(
+                    self.write(ResponseType::SimpleError(
                         "ERR wrong number of arguments for 'incr' command",
                     ));
                 } else {
                     let key = &command.args[0];
-                    if let Some(item) = kv_store.get_clone(key) {
-                        if let Ok(mut num) = item.val.parse::<i64>() {
-                            num += 1;
+
+                    let mut incr_result = None;
+                    {
+                        let incr_action = |_: &str, item: Option<&mut KvItem>| {
+                            if let Some(item) = item {
+                                if let Ok(mut num) = item.val.parse::<i64>() {
+                                    num += 1;
+                                    incr_result = Some(Ok(num));
+                                } else {
+                                    incr_result =
+                                        Some(Err("ERR value is not an integer or out of range"));
+                                }
+                            } else {
+                                incr_result = Some(Ok(1));
+                            }
+                        };
+                        kv_store.do_action(key, incr_action);
+                    }
+
+                    match incr_result {
+                        Some(Ok(num)) => {
                             kv_store.insert(key.clone(), KvItem::new(num.to_string(), None));
-                            resps.push(ResponseType::Integer(num));
-                        } else {
-                            resps.push(ResponseType::SimpleError(
-                                "ERR value is not an integer or out of range",
-                            ));
+                            self.write(ResponseType::Integer(num));
                         }
-                    } else {
-                        kv_store.insert(key.clone(), KvItem::new("1".to_string(), None));
-                        resps.push(ResponseType::Integer(1));
+                        Some(Err(msg)) => {
+                            self.write(ResponseType::SimpleError(msg));
+                        }
+                        None => {
+                            self.write(ResponseType::SimpleError("ERR unknown error"));
+                        }
                     }
                 }
             }
             "MULTI" => {
-                resps.push(ResponseType::SimpleString("OK"));
+                self.write(ResponseType::SimpleString("OK"));
             }
             "EXEC" => match self.state {
                 ResponseState::Exec => {
-                    resps.push(ResponseType::SimpleError("ERR EXEC without MULTI"));
+                    self.write(ResponseType::SimpleError("ERR EXEC without MULTI"));
                 }
                 ResponseState::Queue => {
-                    resps.push(ResponseType::EmptyArray);
+                    if let Some(commands) = &self.commands {
+                        self.write(ResponseType::ArrayHeader(commands.len()));
+                    } else {
+                        self.write(ResponseType::ArrayHeader(0));
+                    }
                 }
             },
             _ => {
-                resps.push(ResponseType::SimpleError("ERR unknown command"));
-            }
-        }
-
-        for resp in resps {
-            match resp {
-                ResponseType::SimpleString(content) => self.push_simple_string(content),
-                ResponseType::BulkString(content) => self.push_bulk_string(content),
-                ResponseType::NullBulkString => self.push_null_bulk_string(),
-                ResponseType::Integer(num) => self.push_integer(num),
-                ResponseType::SimpleError(content) => self.push_simple_error(content),
-                ResponseType::EmptyArray => self.push_empty_array(),
+                self.write(ResponseType::SimpleError("ERR unknown command"));
             }
         }
 
