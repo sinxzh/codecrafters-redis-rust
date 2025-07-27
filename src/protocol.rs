@@ -130,14 +130,13 @@ impl<'a> Response<'a> {
 
         match self.state {
             ResponseState::Exec => match command.name.as_str() {
-                "COMMAND" | "PING" | "ECHO" | "SET" | "GET" | "INCR" | "EXEC" => {
+                "COMMAND" | "PING" | "ECHO" | "SET" | "GET" | "INCR" | "EXEC" | "DISCARD" => {
                     self.exec_command(command, kv_store)?;
-                    self.send()?;
                 }
                 "MULTI" => {
                     self.commands = Some(Vec::new());
                     self.exec_command(command, kv_store)?;
-                    self.send()?;
+
                     self.state = ResponseState::Queue;
                 }
                 _ => {
@@ -152,7 +151,12 @@ impl<'a> Response<'a> {
                             self.exec_command(command, kv_store)?;
                         }
                     }
-                    self.send()?;
+
+                    self.state = ResponseState::Exec;
+                }
+                "DISCARD" => {
+                    self.queue_command(command)?;
+
                     self.state = ResponseState::Exec;
                 }
                 _ => self.queue_command(command)?,
@@ -165,13 +169,21 @@ impl<'a> Response<'a> {
     fn queue_command(&mut self, command: &Command) -> Result<(), Error> {
         println!("State: {:?} | queue: {:?}", self.state, command);
 
-        if let Some(commands) = &mut self.commands {
-            commands.push(command.clone());
-        } else {
-            return Err(Error::msg("Commands list not initialized"));
+        match command.name.as_str() {
+            "DISCARD" => {
+                self.commands = None;
+                self.write(ResponseType::SimpleString("OK"));
+            }
+            _ => {
+                if let Some(commands) = &mut self.commands {
+                    commands.push(command.clone());
+                    self.write(ResponseType::SimpleString("QUEUED"));
+                } else {
+                    return Err(Error::msg("Commands list not initialized"));
+                }
+            }
         }
 
-        self.write(ResponseType::SimpleString("QUEUED"));
         self.send()?;
         Ok(())
     }
@@ -257,34 +269,32 @@ impl<'a> Response<'a> {
                 } else {
                     let key = &command.args[0];
 
-                    let mut incr_result = None;
+                    let mut incr_result = Ok(0);
                     {
                         let incr_action = |_: &str, item: Option<&mut KvItem>| {
                             if let Some(item) = item {
                                 if let Ok(mut num) = item.val.parse::<i64>() {
                                     num += 1;
-                                    incr_result = Some(Ok(num));
+                                    incr_result = Ok(num);
                                 } else {
-                                    incr_result =
-                                        Some(Err("ERR value is not an integer or out of range"));
+                                    incr_result = Err(Error::msg(
+                                        "ERR value is not an integer or out of range",
+                                    ));
                                 }
                             } else {
-                                incr_result = Some(Ok(1));
+                                incr_result = Ok(1);
                             }
                         };
                         kv_store.do_action(key, incr_action);
                     }
 
                     match incr_result {
-                        Some(Ok(num)) => {
+                        Ok(num) => {
                             kv_store.insert(key.clone(), KvItem::new(num.to_string(), None));
                             self.write(ResponseType::Integer(num));
                         }
-                        Some(Err(msg)) => {
-                            self.write(ResponseType::SimpleError(msg));
-                        }
-                        None => {
-                            self.write(ResponseType::SimpleError("ERR unknown error"));
+                        Err(e) => {
+                            self.write(ResponseType::SimpleError(e.to_string().as_str()));
                         }
                     }
                 }
@@ -304,6 +314,9 @@ impl<'a> Response<'a> {
                     }
                 }
             },
+            "DISCARD" => {
+                self.write(ResponseType::SimpleError("ERR DISCARD without MULTI"));
+            }
             _ => {
                 self.write(ResponseType::SimpleError("ERR unknown command"));
             }
