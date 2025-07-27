@@ -2,20 +2,21 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 
 use crate::kv_store::KvStore;
-use crate::resp::{Request, Response};
+use crate::protocol::{Request, Response};
 
 pub mod kv_store;
-pub mod resp;
+pub mod protocol;
 
 fn handle_connection(stream: TcpStream, mut kv: KvStore) {
     println!("accepted new connection");
 
     let mut req = Request::new(&stream);
+    let mut resp = Response::new(&stream);
+
     loop {
         match req.read_command() {
             Ok(()) => {
-                let mut resp = Response::new(&stream);
-                if let Err(e) = resp.exec_command(&req.commands, &mut kv) {
+                if let Err(e) = resp.process_command(&req.command, &mut kv) {
                     println!("error executing command: {}", e);
                     break;
                 }
