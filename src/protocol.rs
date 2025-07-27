@@ -130,38 +130,40 @@ impl<'a> Response<'a> {
 
         match self.state {
             ResponseState::Exec => match command.name.as_str() {
-                "COMMAND" | "PING" | "ECHO" | "SET" | "GET" | "INCR" | "EXEC" | "DISCARD" => {
-                    self.exec_command(command, kv_store)?;
-                }
                 "MULTI" => {
                     self.commands = Some(Vec::new());
-                    self.exec_command(command, kv_store)?;
 
+                    self.exec_command(command, kv_store)?;
                     self.state = ResponseState::Queue;
                 }
                 _ => {
-                    return Err(Error::msg(format!("Unknown command: {}", command.name)));
+                    self.exec_command(command, kv_store)?;
                 }
             },
             ResponseState::Queue => match command.name.as_str() {
                 "EXEC" => {
-                    self.exec_command(command, kv_store)?; // Write array header
+                    self.queue_command(command)?; // Write array header
+                    self.state = ResponseState::Exec;
+
                     if let Some(commands) = &self.commands.take() {
                         for command in commands {
                             self.exec_command(command, kv_store)?;
                         }
                     }
 
-                    self.state = ResponseState::Exec;
+                    self.commands = None;
                 }
                 "DISCARD" => {
                     self.queue_command(command)?;
-
                     self.state = ResponseState::Exec;
+
+                    self.commands = None;
                 }
                 _ => self.queue_command(command)?,
             },
         }
+
+        self.send()?;
 
         Ok(())
     }
@@ -169,9 +171,19 @@ impl<'a> Response<'a> {
     fn queue_command(&mut self, command: &Command) -> Result<(), Error> {
         println!("State: {:?} | queue: {:?}", self.state, command);
 
+        if self.state != ResponseState::Queue {
+            return Err(Error::msg("invalid state for queue command"));
+        }
+
         match command.name.as_str() {
+            "EXEC" => {
+                if let Some(commands) = &self.commands {
+                    self.write(ResponseType::ArrayHeader(commands.len()));
+                } else {
+                    self.write(ResponseType::ArrayHeader(0));
+                }
+            }
             "DISCARD" => {
-                self.commands = None;
                 self.write(ResponseType::SimpleString("OK"));
             }
             _ => {
@@ -184,12 +196,15 @@ impl<'a> Response<'a> {
             }
         }
 
-        self.send()?;
         Ok(())
     }
 
     fn exec_command(&mut self, command: &Command, kv_store: &mut KvStore) -> Result<(), Error> {
         println!("State: {:?} | exec: {:?}", self.state, command);
+
+        if self.state != ResponseState::Exec {
+            return Err(Error::msg("invalid state for exec command"));
+        }
 
         match command.name.as_str() {
             "COMMAND" => {
@@ -302,27 +317,31 @@ impl<'a> Response<'a> {
             "MULTI" => {
                 self.write(ResponseType::SimpleString("OK"));
             }
-            "EXEC" => match self.state {
-                ResponseState::Exec => {
-                    self.write(ResponseType::SimpleError("ERR EXEC without MULTI"));
-                }
-                ResponseState::Queue => {
-                    if let Some(commands) = &self.commands {
-                        self.write(ResponseType::ArrayHeader(commands.len()));
-                    } else {
-                        self.write(ResponseType::ArrayHeader(0));
-                    }
-                }
-            },
+            "EXEC" => {
+                self.write(ResponseType::SimpleError("ERR EXEC without MULTI"));
+            }
             "DISCARD" => {
                 self.write(ResponseType::SimpleError("ERR DISCARD without MULTI"));
+            }
+            "INFO" => {
+                if command.args.is_empty() {
+                    todo!("handle info command without args");
+                }
+
+                let section = command.args[0].to_lowercase();
+                match section.as_str() {
+                    "replication" => {
+                        self.write(ResponseType::BulkString("# Replication\r\nrole:master"));
+                    }
+                    _ => {
+                        todo!("other section for INFO command: {}", section);
+                    }
+                }
             }
             _ => {
                 self.write(ResponseType::SimpleError("ERR unknown command"));
             }
         }
-
-        self.send()?;
 
         Ok(())
     }
