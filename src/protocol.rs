@@ -90,13 +90,13 @@ impl<'a> Response<'a> {
         }
     }
 
-    pub fn push_simple_string(&mut self, content: &str) {
+    fn push_simple_string(&mut self, content: &str) {
         self.buffer.push('+');
         self.buffer.push_str(content);
         self.buffer.push_str("\r\n");
     }
 
-    pub fn push_bulk_string(&mut self, content: &str) {
+    fn push_bulk_string(&mut self, content: &str) {
         self.buffer.push('$');
         self.buffer.push_str(&content.len().to_string());
         self.buffer.push_str("\r\n");
@@ -104,27 +104,27 @@ impl<'a> Response<'a> {
         self.buffer.push_str("\r\n");
     }
 
-    pub fn push_null_bulk_string(&mut self) {
+    fn push_null_bulk_string(&mut self) {
         self.buffer.push_str("$-1\r\n");
     }
 
-    pub fn push_integer(&mut self, num: i64) {
+    fn push_integer(&mut self, num: i64) {
         self.buffer.push(':');
         self.buffer.push_str(&num.to_string());
         self.buffer.push_str("\r\n");
     }
 
-    pub fn push_simple_error(&mut self, content: &str) {
+    fn push_simple_error(&mut self, content: &str) {
         self.buffer.push('-');
         self.buffer.push_str(content);
         self.buffer.push_str("\r\n");
     }
 
-    pub fn push_empty_array(&mut self) {
+    fn push_empty_array(&mut self) {
         self.buffer.push_str("*0\r\n");
     }
 
-    pub fn send(&mut self) -> Result<(), Error> {
+    fn send(&mut self) -> Result<(), Error> {
         self.writer.write_all(self.buffer.as_bytes())?;
         self.writer.flush()?;
         self.buffer.clear();
@@ -300,11 +300,11 @@ impl<'a> Response<'a> {
 
         for resp in resps {
             match resp {
-                ResponseType::SimpleString(content) => self.push_simple_string(&content),
-                ResponseType::BulkString(content) => self.push_bulk_string(&content),
+                ResponseType::SimpleString(content) => self.push_simple_string(content),
+                ResponseType::BulkString(content) => self.push_bulk_string(content),
                 ResponseType::NullBulkString => self.push_null_bulk_string(),
                 ResponseType::Integer(num) => self.push_integer(num),
-                ResponseType::SimpleError(content) => self.push_simple_error(&content),
+                ResponseType::SimpleError(content) => self.push_simple_error(content),
                 ResponseType::EmptyArray => self.push_empty_array(),
             }
         }
